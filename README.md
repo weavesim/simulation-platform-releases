@@ -16,7 +16,7 @@ chmod +x ~/bin/platform
 ~/bin/platform up
 ```
 
-The first `update` builds the platform on your machine and takes a few minutes. `up` prints the address to open in your browser. The full guide, with updating, mirrors and checking a release by hand: [docs/install.md](docs/install.md). You do not need to download any of the release files by hand.
+With **Podman**, start its socket once first: `systemctl --user enable --now podman.socket` (details for Docker and Podman: [docs/install.md](docs/install.md#docker-or-podman)). The first `update` builds the platform on your machine and takes a few minutes. `up` prints the address to open in your browser. The full guide, with updating, mirrors and checking a release by hand: [docs/install.md](docs/install.md). You do not need to download any of the release files by hand.
 
 ## What is here
 

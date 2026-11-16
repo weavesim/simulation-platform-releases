@@ -33,6 +33,22 @@ The platform is installed by a small program, the **installer**, that runs in a 
    platform update
    ```
 
+### Docker or Podman
+
+The launcher uses `docker` when it finds it, and otherwise `podman`. A `docker` command that is really Podman (the `podman-docker` package installs one) is recognised and treated as Podman. Both are fine; the steps differ a little.
+
+**Podman** (tried rootless, on a Linux server). `platform update` builds the image through Podman's API, which listens on a socket that rootless Podman does not start by itself. Start it once:
+
+```
+systemctl --user enable --now podman.socket
+```
+
+Check it with `systemctl --user is-active podman.socket` (it prints `active`). `enable --now` keeps it on after you log in again; `start` instead of `enable --now` runs it for this session only. On a server nobody logs into, also run `loginctl enable-linger $USER`, or the socket and the daily update timer stop when you log out. Podman's `--init` needs the small `catatonit` program, which is normally installed with Podman; if `platform up` complains that it is missing, install it (`sudo apt install catatonit`). The launcher gives Podman the options it needs (`--userns=keep-id`, `--security-opt label=disable` for SELinux, a health check, and a scratch folder that Podman can open to your user), so you do not.
+
+**Docker.** The launcher looks for the engine's socket in these places, in this order, and uses the first that exists: `PLATFORM_ENGINE_SOCKET`, `DOCKER_HOST` (when it is a `unix://` address), `/var/run/docker.sock`, the active Docker context, rootless Docker's (`$XDG_RUNTIME_DIR/docker.sock`), Docker Desktop's (`~/.docker/run/docker.sock`, `~/.docker/desktop/docker.sock`) and Colima's (`~/.colima/default/docker.sock`). If yours is elsewhere, find it with `docker context inspect --format '{{.Endpoints.docker.Host}}'` and name it: `PLATFORM_ENGINE_SOCKET=/path/to/socket platform update`. When it finds none, it prints where it looked.
+
+**The launcher is a file of its own.** `platform update` updates the platform, not the launcher. To get a newer launcher, run the three download lines of step 2 again. Use the same `--volume` (or `PLATFORM_VOLUME`) for every command: `update`, `check` and `rollback` look for the installation in that folder.
+
 ## Start
 
 ```
@@ -149,6 +165,10 @@ Your projects, the assistant's settings, its sessions and the secrets file are p
 | What you see | What to do |
 |---|---|
 | `platform: Docker or Podman is needed` | Install one of them. |
+| `platform: no socket of the container engine was found. Looked at: …` | Podman: `systemctl --user enable --now podman.socket`, then try again. Docker: find the socket with `docker context inspect --format '{{.Endpoints.docker.Host}}'` and name it with `PLATFORM_ENGINE_SOCKET=/path`. |
+| `the container engine's socket is not at …` | The path you gave in `PLATFORM_ENGINE_SOCKET` does not exist: correct it, or unset the variable to let the launcher look. |
+| `unknown mount option "uid=…"`, or `DOCKER_HOST: parameter not set` | An older launcher: download the launcher again (step 2). |
+| `platform up` complains about a missing init program or `catatonit` (Podman) | `sudo apt install catatonit`. |
 | The port is in use | `platform --port 9092 up`. |
 | It did not become healthy | `platform logs`. |
 | A job says `needs-tools-image` | Run `platform stop`, then `platform --tools up`. |
@@ -157,4 +177,4 @@ Your projects, the assistant's settings, its sessions and the secrets file are p
 
 ## What is tested
 
-Linux (x86-64) with Docker is tested. Podman, macOS and Windows (`platform.cmd`) are written but not yet tested; arm64 images are not built yet.
+Linux (x86-64) with Docker is tested. Podman has been tried by hand, rootless on one Linux server: `update`, `up` and `check`, and installing and removing the daily timer. macOS and Windows (`platform.cmd`) are written but not yet tested; arm64 images are not built yet.
