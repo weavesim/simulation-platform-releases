@@ -169,7 +169,7 @@ Your projects, the assistant's settings, its sessions and the secrets file are p
 | `the container engine's socket is not at …` | The path you gave in `PLATFORM_ENGINE_SOCKET` does not exist: correct it, or unset the variable to let the launcher look. |
 | `unknown mount option "uid=…"`, or `DOCKER_HOST: parameter not set` | An older launcher: download the launcher again (step 2). |
 | `platform up` complains about a missing init program or `catatonit` (Podman) | `sudo apt install catatonit`. |
-| The port is in use | `platform --port 9092 up`. |
+| `platform: port 9091 is already in use on this machine` | Something else holds the port: start on another one, `platform --port 9092 up`, or find what holds it with `ss -ltnp \| grep :9091`. `check`, `update` and `rollback` find the container wherever it runs. |
 | It did not become healthy | `platform logs`. |
 | A job says `needs-tools-image` | Run `platform stop`, then `platform --tools up`. |
 | The folder is not yours or not writable | The launcher runs the container as your user: make the folder yours (`chown -R $(id -u) DIR`). |

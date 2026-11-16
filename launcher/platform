@@ -239,12 +239,23 @@ case "$CMD" in
     mkdir -p "$VOLUME"
     exists && $RT rm "$NAME" >/dev/null
     # shellcheck disable=SC2046
-    if [ "$RT" = podman ]; then
-      # (Podman drops the image's HEALTHCHECK when it builds, so the check is given here)
-      $RT run -d --init --name "$NAME" --restart unless-stopped --health-cmd "/app/bin/platform health" --health-interval 10s --health-timeout 5s --health-start-period 10s $(secure) -p "$BIND:$PORT:9091" -v "$VOLUME:/workspace" -e "PLATFORM_VOLUME_HOST=$VOLUME" $CLAUDE_ARGS $VIEW_ARGS "$IMAGE" >/dev/null
-    else
-      $RT run -d --init --name "$NAME" --restart unless-stopped $(secure) -p "$BIND:$PORT:9091" -v "$VOLUME:/workspace" -e "PLATFORM_VOLUME_HOST=$VOLUME" $CLAUDE_ARGS $VIEW_ARGS "$IMAGE" >/dev/null
-    fi
+    # the engine's own message is kept: a port that is already in use is told in words, and the container it left behind is removed
+    RUNOUT=$( {
+      if [ "$RT" = podman ]; then
+        # (Podman drops the image's HEALTHCHECK when it builds, so the check is given here)
+        $RT run -d --init --name "$NAME" --restart unless-stopped --health-cmd "/app/bin/platform health" --health-interval 10s --health-timeout 5s --health-start-period 10s $(secure) -p "$BIND:$PORT:9091" -v "$VOLUME:/workspace" -e "PLATFORM_VOLUME_HOST=$VOLUME" $CLAUDE_ARGS $VIEW_ARGS "$IMAGE" >/dev/null
+      else
+        $RT run -d --init --name "$NAME" --restart unless-stopped $(secure) -p "$BIND:$PORT:9091" -v "$VOLUME:/workspace" -e "PLATFORM_VOLUME_HOST=$VOLUME" $CLAUDE_ARGS $VIEW_ARGS "$IMAGE" >/dev/null
+      fi
+    } 2>&1 >/dev/null ) || {
+      case "$RUNOUT" in
+        *"address already in use"*|*"port is already allocated"*)
+          echo "platform: port $PORT is already in use on this machine. Use another one: platform --port $((PORT + 1)) up  (what holds it: ss -ltnp | grep :$PORT)" >&2 ;;
+        *) echo "$RUNOUT" >&2 ;;
+      esac
+      $RT rm "$NAME" >/dev/null 2>&1 || true
+      exit 1
+    }
     i=0
     until [ "$($RT container inspect -f '{{.State.Health.Status}}' "$NAME" 2>/dev/null)" = healthy ] || [ $i -ge 60 ]; do i=$((i+1)); sleep 1; done
     if [ "$($RT container inspect -f '{{.State.Health.Status}}' "$NAME" 2>/dev/null)" != healthy ]; then echo "platform: it did not become healthy in 60 s: platform logs" >&2; exit 1; fi
