@@ -1,0 +1,10 @@
+END-USER LICENCE FOR THE PLATFORM
+
+Copyright (c) the owner of the platform. All rights not granted here are reserved.
+
+1. Use. You may run the platform in this image, for any purpose, at no charge.
+2. No redistribution or modification. You may not redistribute the platform or its parts, or modify them, except where the law forbids this restriction. Reading, studying or taking apart the platform's programs for your own understanding is not restricted by this licence.
+3. Third-party components. The image also holds software of others (the libraries and programs named in THIRD_PARTY and in the licence files under /usr/share/doc and /licenses). Each keeps its own licence. Nothing in this licence restricts the rights those licences give you, and the restrictions in section 2 do not apply to them.
+4. Your data. The projects, models, scenarios and results on your volume are yours. The platform sends nothing anywhere unless you ask it to.
+5. No warranty. The platform is provided as it is, without warranty of any kind, and its owner is not liable for any loss from its use, to the extent the law allows.
+6. Names. The platform's name and marks stay with the owner.

@@ -1,0 +1,366 @@
+#!/bin/sh
+# platform - start, stop, update and use the platform images on this machine (docs/prd-packaging.md, 4.4). Needs Docker or Podman, nothing else.
+# `update`, `check` and `rollback` run the installer image (docs/prd-release-and-update.md, 6.9), which downloads a release, checks it against its signed manifest, builds the image beside the running container and
+# switches (and puts the old one back if the new one is not healthy). The installer holds the container engine's socket only while it runs: a root-equivalent power, given to this one signed program and not to the platform.
+# A command is always needed: `platform help` (or no command) prints the commands, the options and the environment as tables, and starts nothing.
+# `platform connect HOST` and `platform disconnect` need ssh only: they reach a platform that runs on another machine through an SSH tunnel (docs/install.md, "Work on a server").
+set -eu
+NAME=${PLATFORM_NAME:-platform}
+BASE=${PLATFORM_IMAGE_BASE:-}
+TAG=${PLATFORM_TAG:-latest}
+PORT=${PLATFORM_PORT:-9091}
+VOLUME=${PLATFORM_VOLUME:-$HOME/platform-projects}
+TOOLS=0; OPEN=0; CLAUDE=0; CMD=help
+INSTARGS=""; CHECK=0; TIMER=""
+PORT_SET=0; [ -n "${PLATFORM_PORT:-}" ] && PORT_SET=1
+RPORT=${PLATFORM_REMOTE_PORT:-9091}; HOSTARG=""
+ASK=1; [ "${PLATFORM_CONNECT_ASK:-1}" = 0 ] && ASK=0
+CONNDIR=${PLATFORM_CONNECT_DIR:-$HOME/.platform/connect}
+VIEWPORT=${PLATFORM_VIEW_PORT:-}; VIEWHOST=${PLATFORM_VIEW_HOST:-127.0.0.1}
+
+RT=""; if command -v docker >/dev/null 2>&1; then RT=docker; elif command -v podman >/dev/null 2>&1; then RT=podman; fi
+# a `docker` that is the podman-docker shim says so: it is Podman, with Podman's socket and options
+if [ -n "$RT" ]; then case "$($RT --version 2>/dev/null | tr 'A-Z' 'a-z')" in *podman*) RT=podman ;; esac; fi
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tools) TOOLS=1 ;;
+    --open) OPEN=1 ;;
+    --claude) CLAUDE=1 ;;
+    --volume) shift; VOLUME=${1:?--volume needs a folder} ;;
+    --port) shift; PORT=${1:?--port needs a number}; PORT_SET=1 ;;
+    --remote-port) shift; RPORT=${1:?--remote-port needs a number} ;;
+    --no-ask) ASK=0 ;;
+    --tag) shift; TAG=${1:?--tag needs a tag} ;;
+    --yes|--patch-only|--no-snapshot) INSTARGS="$INSTARGS $1" ;;
+    --to) shift; INSTARGS="$INSTARGS --to ${1:?--to needs a version}" ;;
+    --check) CHECK=1 ;;
+    --auto) INSTARGS="$INSTARGS --auto" ;;
+    --max-wait) shift; INSTARGS="$INSTARGS --max-wait ${1:?--max-wait needs a number of seconds}" ;;
+    --install-timer) TIMER=install ;;
+    --remove-timer) TIMER=remove ;;
+    --view-port) shift; VIEWPORT=${1:?--view-port needs a number} ;;
+    --view-host) shift; VIEWHOST=${1:?--view-host needs an address} ;;
+    -h|--help|help) CMD=help ;;
+    up|stop|status|logs|update|check|rollback|url|version|mcp|mcp-config) CMD=$1 ;;
+    connect|disconnect) CMD=$1; case "${2:-}" in ""|-*) ;; *) HOSTARG=$2; shift ;; esac ;;
+    *) echo "platform: unknown option or command: $1 (platform help)" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+[ "$CMD" = update ] && [ $CHECK = 1 ] && CMD=check
+[ -n "$TIMER" ] && CMD=timer
+case "$VIEWPORT" in ""|*[!0-9]*) [ -z "$VIEWPORT" ] || { echo "platform: --view-port needs a port number, not $VIEWPORT" >&2; exit 2; } ;; esac
+case "$RPORT" in ""|*[!0-9]*) echo "platform: --remote-port needs a port number, not $RPORT" >&2; exit 2 ;; esac
+# the help, connect and disconnect need no container runtime; every other command does
+if [ -z "$RT" ] && [ "$CMD" != help ] && [ "$CMD" != connect ] && [ "$CMD" != disconnect ] && [ "$CMD" != timer ]; then echo "platform: Docker or Podman is needed: install one first (https://docs.docker.com/get-docker/)" >&2; exit 1; fi
+IMG=platform; [ $TOOLS = 1 ] && IMG=platform-tools
+# the installer names the images it builds the same way (PLATFORM_IMAGE_NAME, for trying an install beside a real one)
+if [ -n "${PLATFORM_IMAGE_NAME:-}" ]; then IMG=$PLATFORM_IMAGE_NAME; fi
+[ -n "$BASE" ] && IMAGE="$BASE/$IMG:$TAG" || IMAGE="$IMG:$TAG"
+UIDGID="$(id -u):$(id -g)"
+BIND=127.0.0.1; [ $OPEN = 1 ] && BIND=0.0.0.0
+# --view-port N: a second port that serves share links (view-only dashboards) and nothing else (docs/prd-shared-dashboards.md). Inside the container it is 9092 and listens on every interface of the container;
+# on this machine it is N, on 127.0.0.1 unless --view-host says another address (0.0.0.0: everyone who can reach this machine can open a share link, and needs its token)
+VIEW_ARGS=""
+[ -n "$VIEWPORT" ] && VIEW_ARGS="-p $VIEWHOST:$VIEWPORT:9092 -e PLATFORM_VIEW=1 -e PLATFORM_VIEW_PUBLIC_PORT=$VIEWPORT"
+
+# how the container runs: a normal user, a read-only root with the two places that must be written, no added capabilities
+secure() {
+  # (Podman does not take the owner of a tmpfs as an option: it is open to the one user inside the container instead)
+  if [ "$RT" = podman ]; then TB="exec,mode=1777"; else TB="exec,uid=$(id -u),gid=$(id -g)"; fi
+  echo "--read-only --tmpfs /tmp:exec --tmpfs /app/build:$TB --cap-drop ALL --security-opt no-new-privileges -u $UIDGID"
+  [ $RT = podman ] && echo "--userns=keep-id --security-opt label=disable"
+  return 0
+}
+# --claude: the person's own Claude Code for the assistant's bridge (docs/assistant-setup.md). The program is mounted read-only; its folder (the sign-in is in it) read-write, because the program refreshes its own token.
+# Opt-in, because a process in the container can then read that sign-in. Linux and Windows (WSL) only: on macOS the sign-in is in the Keychain, which a container cannot read.
+CLAUDE_ARGS=""
+if [ $CLAUDE = 1 ]; then
+  if [ "$(uname -s)" = Darwin ]; then echo "platform: --claude is for Linux (and WSL): on macOS the Claude Code sign-in is in the Keychain, which a container cannot read, and its program is not a Linux one. Sign in inside the container instead (docs/assistant-setup.md)." >&2; exit 1; fi
+  CBIN=${PLATFORM_CLAUDE_HOST_BIN:-$(command -v claude 2>/dev/null || true)}
+  [ -n "$CBIN" ] && CBIN=$(readlink -f "$CBIN" 2>/dev/null || echo "$CBIN")
+  CDIR=${PLATFORM_CLAUDE_HOST_DIR:-$HOME/.claude}
+  if [ -z "$CBIN" ] || [ ! -f "$CBIN" ] || [ ! -x "$CBIN" ]; then echo "platform: --claude: the claude program was not found (looked on PATH; PLATFORM_CLAUDE_HOST_BIN names it). Install Claude Code first." >&2; exit 1; fi
+  if [ ! -d "$CDIR" ]; then echo "platform: --claude: the folder $CDIR does not exist: sign in with claude on this machine first (PLATFORM_CLAUDE_HOST_DIR names another folder)." >&2; exit 1; fi
+  case "$CBIN$CDIR" in *[[:space:]]*) echo "platform: --claude: a path with a space in it is not supported ($CBIN, $CDIR): link the folder or the program to a path without one" >&2; exit 1 ;; esac
+  CLAUDE_ARGS="-v $CBIN:/opt/claude/claude:ro -v $CDIR:/claude-config -e PLATFORM_CLAUDE_BIN=/opt/claude/claude -e CLAUDE_CONFIG_DIR=/claude-config -e HOME=/tmp"
+fi
+# THE HELP'S FORMAT (the Makefile's `make help` follows it; platform/docker/launcher_test.sh checks both; keep it when a command or an option is added):
+#   a section is an upper-case title, then rows; a row is `  <what you type>   <what it does>`: the name on the left, the description on the right, all descriptions starting in one column;
+#   every command, option and environment variable has a row; a long description goes on in the next row with an empty left side; no line is wider than 100 characters.
+# the help: three tables, the name on the left and what it does on the right (a row with an empty left side goes on with the row above)
+row() { printf '  %-24s %s\n' "$1" "$2"; }
+usage() {
+  echo "platform - run the platform images on this machine. Needs Docker or Podman, nothing else."
+  echo "Usage: platform COMMAND [OPTIONS]"
+  echo "A command is always needed: with none (or only options) this help is shown and nothing is started."
+  echo
+  echo "COMMANDS"
+  row "up" "start it, print the address (projects in ~/platform-projects)"
+  row "stop" "stop it and remove the container; your projects stay in their folder"
+  row "status" "running or not, image, address, health, Claude Code mounted or not"
+  row "logs" "the container's log"
+  row "url" "print the address"
+  row "version" "print the version of the image"
+  row "update" "install the newest release (builds it, switches, undoes it if unhealthy)"
+  row "check" "say if a newer release exists and what it asks (or: update --check)"
+  row "rollback" "go back to the previous release, with .platform put back from its copy"
+  row "mcp" "the MCP server on stdin and stdout, for an agent client (Claude Code...)"
+  row "mcp-config" "print the configuration to give that client"
+  row "connect HOST" "reach the platform of another machine by an SSH tunnel (ssh only);"
+  row "" "HOST is a name for ssh (your ~/.ssh/config); prints the local address"
+  row "disconnect [HOST]" "close that tunnel (with no HOST: every tunnel)"
+  row "help" "this text"
+  echo
+  echo "OPTIONS (before or after the command)"
+  row "--tools" "use platform-tools: code generator, compilers, QEMU, PLC tools"
+  row "--volume DIR" "the projects folder (default ~/platform-projects)"
+  row "--port N" "the port on this machine (default 9091)"
+  row "--tag T" "the image's tag (default latest)"
+  row "--yes" "update: say yes to what a release asks (an interface, a migration, tools)"
+  row "--patch-only" "update: only a patch release of the one installed"
+  row "--to X.Y.Z" "update: that release, not the newest"
+  row "--no-snapshot" "update: do not copy .platform first"
+  row "--check" "update: only say what there is, change nothing"
+  row "--auto" "update: unattended: a patch or security release that asks nothing, and"
+  row "" "only while the platform is idle (what the timer runs)"
+  row "--max-wait SECS" "with --auto: the longest wait for it to be idle (default 21600)"
+  row "--install-timer" "update daily by itself (--auto): a systemd user timer, or on macOS a"
+  row "" "launchd agent; the log is .platform/update-timer.log"
+  row "--remove-timer" "take that timer away"
+  row "--remote-port N" "connect: the port of the platform on the other machine (default 9091)"
+  row "--no-ask" "connect: ssh asks nothing (no password or question): for scripts"
+  row "--open" "also reach it from other machines (page only; read the warning)"
+  row "--view-port N" "also serve share links (view-only dashboards) on port N"
+  row "--view-host ADDR" "the address of that port (default 127.0.0.1; 0.0.0.0: every machine)"
+  row "--claude" "let the assistant use YOUR Claude Code: mounts the claude program"
+  row "" "(read-only) and its sign-in folder ~/.claude (read-write): a security"
+  row "" "choice, read the warning it prints"
+  echo
+  echo "ENVIRONMENT (the same settings without the option)"
+  row "PLATFORM_VOLUME" "the projects folder"
+  row "PLATFORM_PORT" "the port"
+  row "PLATFORM_TAG" "the image tag"
+  row "PLATFORM_VIEW_PORT" "the view port (--view-port)"
+  row "PLATFORM_VIEW_HOST" "its address (--view-host)"
+  row "PLATFORM_IMAGE_BASE" "the registry path of the images"
+  row "PLATFORM_MANIFEST_URL" "where the release manifests are (a company mirror)"
+  row "PLATFORM_FILES_URL" "a mirror's folder for the release files (checksums stay signed)"
+  row "PLATFORM_INSTALLER_IMAGE" "the installer image (default ghcr.io/weavesim/platform-installer)"
+  row "PLATFORM_ENGINE_SOCKET" "the container engine's socket (Docker or Podman default)"
+  row "PLATFORM_IMAGE_NAME" "the name of the images the installer makes (default platform)"
+  row "PLATFORM_NAME" "the container's name (default platform)"
+  row "PLATFORM_REMOTE_PORT" "the remote port of connect (--remote-port)"
+  row "PLATFORM_CONNECT_ASK" "0: connect asks nothing, as --no-ask (default 1: ssh may ask)"
+  row "PLATFORM_CONNECT_DIR" "where connect keeps its tunnels (default ~/.platform/connect)"
+  row "PLATFORM_CLAUDE_HOST_BIN" "the claude program, when it is not on PATH"
+  row "PLATFORM_CLAUDE_HOST_DIR" "its sign-in folder, when it is not ~/.claude"
+  echo
+  echo "It starts again by itself after a crash or a restart, until you run platform stop."
+  echo "(With Podman that needs a systemd unit: docs/install.md.)"
+}
+# connect and disconnect: one ssh "master" connection for each host, kept by a control socket in $CONNDIR (<name>.sock; <name>.host and <name>.port say what it is). ssh does the signing in with the
+# person's own keys and agent and reads ~/.ssh/config (ProxyJump and the rest). By default ssh may ask on the terminal (a password, the passphrase of a key, whether to trust a new host: the answers go to
+# ssh itself, never through this script, and it never trusts a host key by itself); with --no-ask (PLATFORM_CONNECT_ASK=0) it asks nothing (BatchMode) and fails instead, for a script. The local end is
+# on 127.0.0.1 only; over there the platform is reached at its own 127.0.0.1.
+conn_key() { printf '%s' "$1" | tr -c 'A-Za-z0-9._@-' '_'; }
+conn_open() { ssh -S "$CONNDIR/$1.sock" -O check -- "$2" >/dev/null 2>&1; }
+conn_close() {   # conn_close <key> <host>
+  ssh -S "$CONNDIR/$1.sock" -O exit -- "$2" >/dev/null 2>&1 || true
+  rm -f "$CONNDIR/$1.sock" "$CONNDIR/$1.host" "$CONNDIR/$1.port"
+}
+conn_answers() {   # does the platform answer at http://127.0.0.1:$1/health? (with neither curl nor wget it cannot be asked: yes)
+  if command -v curl >/dev/null 2>&1; then curl -fsS -m 5 "http://127.0.0.1:$1/health" >/dev/null 2>&1
+  elif command -v wget >/dev/null 2>&1; then wget -q -T 5 -O /dev/null "http://127.0.0.1:$1/health" >/dev/null 2>&1
+  else return 0; fi
+}
+do_connect() {
+  H=$HOSTARG
+  if [ -z "$H" ]; then echo "platform: connect needs a host: platform connect HOST (a name ssh knows: ~/.ssh/config, or user@machine)" >&2; exit 2; fi
+  case "$H" in -*|*[[:space:]]*) echo "platform: connect: not a host name for ssh: $H" >&2; exit 2 ;; esac
+  command -v ssh >/dev/null 2>&1 || { echo "platform: connect needs ssh on this machine: install an OpenSSH client first" >&2; exit 1; }
+  K=$(conn_key "$H")
+  mkdir -p "$CONNDIR"; chmod 700 "$CONNDIR" 2>/dev/null || true
+  if conn_open "$K" "$H"; then
+    echo "already connected to $H: http://127.0.0.1:$(cat "$CONNDIR/$K.port" 2>/dev/null) (platform disconnect $H closes it)"; exit 0
+  fi
+  rm -f "$CONNDIR/$K.sock" "$CONNDIR/$K.host" "$CONNDIR/$K.port"
+  ERR="$CONNDIR/$K.err"; p=$PORT; last=$((PORT + 19)); [ $PORT_SET = 1 ] && last=$PORT
+  BATCH=""; [ $ASK = 0 ] && BATCH="-o BatchMode=yes"
+  while :; do
+    # shellcheck disable=SC2086
+    if ssh -f -N -M -S "$CONNDIR/$K.sock" $BATCH -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+         -L "127.0.0.1:$p:127.0.0.1:$RPORT" -- "$H" 2>"$ERR"; then break; fi
+    # the local port is taken (by a platform on this machine, say): the next one, unless the person named the port
+    if grep -q -i -E 'address already in use|cannot listen|could not request local forwarding' "$ERR" && [ "$p" -lt "$last" ]; then p=$((p + 1)); continue; fi
+    echo "platform: connect: ssh to $H failed:" >&2; sed 's/^/  /' "$ERR" >&2; rm -f "$ERR"
+    if [ $ASK = 0 ]; then echo "  (--no-ask: nothing is asked: a key with a passphrase must be in ssh-agent (ssh-add), and a host ssh has not met must be accepted once with: ssh $H)" >&2
+    else echo "  (check the name, your key (ssh-add) or password, and that ssh $H works by itself)" >&2; fi
+    exit 1
+  done
+  rm -f "$ERR"
+  printf '%s\n' "$H" > "$CONNDIR/$K.host"; printf '%s\n' "$p" > "$CONNDIR/$K.port"
+  i=0; until conn_answers "$p" || [ $i -ge 10 ]; do i=$((i + 1)); sleep 1; done
+  if ! conn_answers "$p"; then
+    conn_close "$K" "$H"
+    echo "platform: connect: the tunnel to $H opened, but nothing answers at port $RPORT over there. Start it on that machine (platform up), or give its port with --remote-port N. The tunnel is closed." >&2
+    exit 1
+  fi
+  echo "connected to $H: open http://127.0.0.1:$p in your browser (the platform of $H; your projects are on $H)."
+  echo "platform disconnect $H closes it. It stays open until then, or until the network is lost for about 90 seconds."
+}
+do_disconnect() {
+  if [ -n "$HOSTARG" ]; then
+    K=$(conn_key "$HOSTARG")
+    if [ -e "$CONNDIR/$K.sock" ] || [ -e "$CONNDIR/$K.host" ]; then conn_close "$K" "$HOSTARG"; echo "disconnected from $HOSTARG."; else echo "not connected to $HOSTARG."; fi
+    return 0
+  fi
+  found=0
+  for f in "$CONNDIR"/*.host; do
+    [ -e "$f" ] || continue
+    K=$(basename "$f" .host); H=$(cat "$f"); conn_close "$K" "$H"; echo "disconnected from $H."; found=1
+  done
+  [ $found = 1 ] || echo "no tunnel is open."
+}
+exists() { $RT container inspect "$NAME" >/dev/null 2>&1; }
+running() { [ "$($RT container inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null || echo false)" = true ]; }
+image_of() { $RT container inspect -f '{{.Config.Image}}' "$NAME" 2>/dev/null; }
+
+case "$CMD" in
+  help) usage ;;
+  connect) do_connect ;;
+  disconnect) do_disconnect ;;
+  version) $RT run --rm "$IMAGE" version ;;
+  url) echo "http://127.0.0.1:$PORT" ;;
+  up)
+    if running; then echo "platform is already running ($(image_of)): http://127.0.0.1:$PORT (platform stop first to change image)"; exit 0; fi
+    mkdir -p "$VOLUME"
+    exists && $RT rm "$NAME" >/dev/null
+    # shellcheck disable=SC2046
+    if [ "$RT" = podman ]; then
+      # (Podman drops the image's HEALTHCHECK when it builds, so the check is given here)
+      $RT run -d --init --name "$NAME" --restart unless-stopped --health-cmd "/app/bin/platform health" --health-interval 10s --health-timeout 5s --health-start-period 10s $(secure) -p "$BIND:$PORT:9091" -v "$VOLUME:/workspace" -e "PLATFORM_VOLUME_HOST=$VOLUME" $CLAUDE_ARGS $VIEW_ARGS "$IMAGE" >/dev/null
+    else
+      $RT run -d --init --name "$NAME" --restart unless-stopped $(secure) -p "$BIND:$PORT:9091" -v "$VOLUME:/workspace" -e "PLATFORM_VOLUME_HOST=$VOLUME" $CLAUDE_ARGS $VIEW_ARGS "$IMAGE" >/dev/null
+    fi
+    i=0
+    until [ "$($RT container inspect -f '{{.State.Health.Status}}' "$NAME" 2>/dev/null)" = healthy ] || [ $i -ge 60 ]; do i=$((i+1)); sleep 1; done
+    if [ "$($RT container inspect -f '{{.State.Health.Status}}' "$NAME" 2>/dev/null)" != healthy ]; then echo "platform: it did not become healthy in 60 s: platform logs" >&2; exit 1; fi
+    echo "platform $($RT run --rm "$IMAGE" version | sed 's/^platform //') ($IMAGE) is running."
+    echo "Open http://127.0.0.1:$PORT in your browser. Your projects are in $VOLUME."
+    if [ $CLAUDE = 1 ]; then
+      echo "WARNING: --claude mounts your Claude Code sign-in folder ($CDIR) into the container, read and write, and the program $CBIN read-only. Anything that runs in the container can read that sign-in. Only the assistant's bridge uses it, and only when you ask a question with the backend set to bridge; the platform's own code never opens those files. Without --claude nothing of yours is mounted but the projects folder."
+    fi
+    if [ -n "$VIEWPORT" ]; then
+      echo "Share links are served on http://$VIEWHOST:$VIEWPORT (view only, one token for each link)."
+      case "$VIEWHOST" in 127.0.0.1|localhost|::1) ;; *) echo "WARNING: --view-host $VIEWHOST publishes port $VIEWPORT to other machines, with no encryption: put a TLS proxy in front of it before it is used outside a trusted network." >&2 ;; esac
+    fi
+    if [ $OPEN = 1 ]; then
+      echo "WARNING: --open publishes port $PORT on every network interface of this machine. Other machines can load the page. The server refuses API requests that do not come from this machine, so they cannot change your projects, and there is no encryption: for a shared server put your own TLS proxy in front (docs/install.md)."
+    else
+      echo "It answers on this machine only. (platform --open up: reach it from other machines.)"
+    fi ;;
+  stop) if exists; then $RT stop "$NAME" >/dev/null && $RT rm "$NAME" >/dev/null && echo "platform is stopped. Your projects are still in $VOLUME."; else echo "platform is not running."; fi ;;
+  status) if running; then echo "running: $(image_of), http://127.0.0.1:$PORT, health $($RT container inspect -f '{{.State.Health.Status}}' "$NAME" 2>/dev/null)$($RT container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$NAME" 2>/dev/null | grep -q '^PLATFORM_CLAUDE_BIN=' && echo ', with your Claude Code mounted')"; else echo "not running"; fi ;;
+  logs) $RT logs "$NAME" ;;
+  timer)
+    # a daily unattended update: `platform --auto update` run by the system's own scheduler (docs/prd-release-and-update.md, 6.3). It installs a patch or a security release that asks nothing, only while the
+    # platform is idle, and writes to .platform/update-timer.log in the projects folder; every other release is shown by the page and by `platform check`, and waits for you.
+    SELF=$(readlink -f "$0" 2>/dev/null || echo "$0")
+    case "$SELF$VOLUME" in *"'"*) echo "platform: a path with a quote in it (' ) is not supported for the timer: $SELF, $VOLUME" >&2; exit 1 ;; esac
+    LOG="$VOLUME/.platform/update-timer.log"
+    TOOLSOPT=""; if [ $TOOLS = 1 ]; then TOOLSOPT="--tools"; fi
+    CMDLINE="\"$SELF\" --volume \"$VOLUME\" $TOOLSOPT --auto update >> \"$LOG\" 2>&1"
+    ENVS=""
+    for v in PLATFORM_NAME PLATFORM_MANIFEST_URL PLATFORM_FILES_URL PLATFORM_INSTALLER_IMAGE PLATFORM_IMAGE_NAME PLATFORM_ENGINE_SOCKET; do
+      eval "val=\${$v:-}"
+      if [ -n "$val" ]; then ENVS="$ENVS$v=$val
+"; fi
+    done
+    if [ "$(uname -s)" = Darwin ]; then
+      PLIST="$HOME/Library/LaunchAgents/io.weavesim.platform-update.plist"
+      if [ "$TIMER" = remove ]; then
+        launchctl unload "$PLIST" 2>/dev/null || true; rm -f "$PLIST"; echo "the daily update is removed."
+      else
+        mkdir -p "$HOME/Library/LaunchAgents" "$VOLUME/.platform"
+        {
+          echo '<?xml version="1.0" encoding="UTF-8"?>'
+          echo '<plist version="1.0"><dict>'
+          echo '<key>Label</key><string>io.weavesim.platform-update</string>'
+          echo "<key>ProgramArguments</key><array><string>/bin/sh</string><string>-c</string><string>$CMDLINE</string></array>"
+          echo '<key>StartCalendarInterval</key><dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>17</integer></dict>'
+          if [ -n "$ENVS" ]; then
+            echo '<key>EnvironmentVariables</key><dict>'
+            echo "$ENVS" | while IFS='=' read -r k v; do if [ -n "$k" ]; then echo "<key>$k</key><string>$v</string>"; fi; done
+            echo '</dict>'
+          fi
+          echo '</dict></plist>'
+        } > "$PLIST"
+        launchctl unload "$PLIST" 2>/dev/null || true; launchctl load "$PLIST"
+        echo "the platform will be updated every night by itself (a patch or security release that asks nothing, while it is idle). The log: $LOG"
+      fi
+    else
+      UNITS=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
+      if [ "$TIMER" = remove ]; then
+        systemctl --user disable --now platform-update.timer 2>/dev/null || true
+        rm -f "$UNITS/platform-update.service" "$UNITS/platform-update.timer"; systemctl --user daemon-reload 2>/dev/null || true
+        echo "the daily update is removed."
+      else
+        mkdir -p "$UNITS" "$VOLUME/.platform"
+        {
+          echo "[Unit]"; echo "Description=Update the platform (platform --auto update): a patch or security release that asks nothing, while it is idle"
+          echo "[Service]"; echo "Type=oneshot"
+          echo "$ENVS" | while IFS= read -r l; do if [ -n "$l" ]; then echo "Environment=\"$l\""; fi; done
+          echo "ExecStart=/bin/sh -c '$CMDLINE'"
+        } > "$UNITS/platform-update.service"
+        {
+          echo "[Unit]"; echo "Description=A daily check for an update of the platform"
+          echo "[Timer]"; echo "OnCalendar=daily"; echo "RandomizedDelaySec=3600"; echo "Persistent=true"
+          echo "[Install]"; echo "WantedBy=timers.target"
+        } > "$UNITS/platform-update.timer"
+        systemctl --user daemon-reload && systemctl --user enable --now platform-update.timer
+        echo "the platform will be updated every day by itself (a patch or security release that asks nothing, while it is idle). The log: $LOG"
+        echo "(A systemd user timer runs while you are logged in; for a server, once: loginctl enable-linger $(id -un))"
+      fi
+    fi ;;
+  update|check|rollback)
+    # the installer: one signed program in its own container, with the engine's socket and the volume (docs/prd-release-and-update.md, 6.9)
+    SOCK=${PLATFORM_ENGINE_SOCKET:-}
+    if [ -n "$SOCK" ]; then
+      if [ ! -S "$SOCK" ]; then echo "platform: the container engine's socket is not at $SOCK (PLATFORM_ENGINE_SOCKET names it)" >&2; exit 1; fi
+    else
+      XR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+      if [ "$RT" = podman ]; then
+        PSOCK=$(podman info --format '{{.Host.RemoteSocket.Path}}' 2>/dev/null || true)
+        TRIED="$XR/podman/podman.sock /run/podman/podman.sock ${PSOCK#unix://} /var/run/docker.sock"
+      else
+        CTX=$($RT context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)
+        TRIED="${DOCKER_HOST#unix://} /var/run/docker.sock ${CTX#unix://} $XR/docker.sock $HOME/.docker/run/docker.sock $HOME/.docker/desktop/docker.sock $HOME/.colima/default/docker.sock"
+      fi
+      # (a path with a space in it is not looked for: the engine's own sockets are in plain places)
+      for c in $TRIED; do if [ -S "$c" ]; then SOCK=$c; break; fi; done
+      if [ -z "$SOCK" ]; then
+        echo "platform: no socket of the container engine was found. Looked at: $(echo $TRIED)" >&2
+        if [ "$RT" = podman ]; then echo "  Podman: start its socket with  systemctl --user enable --now podman.socket  and run this again; or name the socket with PLATFORM_ENGINE_SOCKET." >&2
+        else echo "  Find it with  $RT context inspect --format '{{.Endpoints.docker.Host}}'  and name it with PLATFORM_ENGINE_SOCKET=/path/to/socket." >&2; fi
+        exit 1
+      fi
+    fi
+    SGID=$(stat -c %g "$SOCK" 2>/dev/null || stat -f %g "$SOCK" 2>/dev/null || id -g)
+    INSTALLER=${PLATFORM_INSTALLER_IMAGE:-ghcr.io/weavesim/platform-installer:latest}
+    mkdir -p "$VOLUME" "$HOME/.cache/platform"
+    PODMAN_ARGS=""; [ "$RT" = podman ] && PODMAN_ARGS="--userns=keep-id --security-opt label=disable"
+    MANIFEST_ARGS=""; [ -n "${PLATFORM_MANIFEST_URL:-}" ] && MANIFEST_ARGS="-e PLATFORM_MANIFEST_URL=$PLATFORM_MANIFEST_URL"
+    NAME_ARGS=""; [ -n "${PLATFORM_IMAGE_NAME:-}" ] && NAME_ARGS="-e PLATFORM_IMAGE_NAME=$PLATFORM_IMAGE_NAME"
+    FILES_ARGS=""; [ -n "${PLATFORM_FILES_URL:-}" ] && FILES_ARGS="-e PLATFORM_FILES_URL=$PLATFORM_FILES_URL"
+    # shellcheck disable=SC2046,SC2086
+    $RT run --rm --user "$UIDGID" --group-add "$SGID" $PODMAN_ARGS -v "$SOCK:/var/run/docker.sock" -v "$VOLUME:/workspace" -v "$HOME/.cache/platform:/cache" -e "PLATFORM_NAME=$NAME" $MANIFEST_ARGS $FILES_ARGS $NAME_ARGS "$INSTALLER" "$CMD" $( [ $TOOLS = 1 ] && echo --tools ) $INSTARGS ;;
+  mcp)
+    mkdir -p "$VOLUME"
+    # shellcheck disable=SC2046
+    exec $RT run -i --rm $(secure) --network none -v "$VOLUME:/workspace" "$IMAGE" mcp ;;
+  mcp-config)
+    printf '{\n  "mcpServers": {\n    "platform": {\n      "command": "%s",\n      "args": ["run", "-i", "--rm", "--read-only", "--tmpfs", "/tmp:exec", "--cap-drop", "ALL", "--network", "none", "-u", "%s", "-v", "%s:/workspace", "%s", "mcp"]\n    }\n  }\n}\n' "$RT" "$UIDGID" "$VOLUME" "$IMAGE" ;;
+esac
