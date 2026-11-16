@@ -337,7 +337,8 @@ case "$CMD" in
         TRIED="$XR/podman/podman.sock /run/podman/podman.sock ${PSOCK#unix://} /var/run/docker.sock"
       else
         CTX=$($RT context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)
-        TRIED="${DOCKER_HOST#unix://} /var/run/docker.sock ${CTX#unix://} $XR/docker.sock $HOME/.docker/run/docker.sock $HOME/.docker/desktop/docker.sock $HOME/.colima/default/docker.sock"
+        DH=${DOCKER_HOST:-}
+        TRIED="${DH#unix://} /var/run/docker.sock ${CTX#unix://} $XR/docker.sock $HOME/.docker/run/docker.sock $HOME/.docker/desktop/docker.sock $HOME/.colima/default/docker.sock"
       fi
       # (a path with a space in it is not looked for: the engine's own sockets are in plain places)
       for c in $TRIED; do if [ -S "$c" ]; then SOCK=$c; break; fi; done
