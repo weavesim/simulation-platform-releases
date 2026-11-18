@@ -1,69 +1,69 @@
 {
   "v": 1,
   "channel": "stable",
-  "version": "0.3.0",
-  "released": "2026-11-16",
-  "notes_url": "https://github.com/weavesim/simulation-platform-releases/releases/tag/v0.3.0",
+  "version": "0.4.0",
+  "released": "2026-11-18",
+  "notes_url": "https://github.com/weavesim/simulation-platform-releases/releases/tag/v0.4.0",
   "recipe": {
-    "name": "platform-recipe-0.3.0.tar.zst",
-    "url": "https://github.com/weavesim/simulation-platform-releases/releases/download/v0.3.0/platform-recipe-0.3.0.tar.zst",
-    "sha256": "796cd9bd5efa87c464855e9230aa640d5cd08acfb5cef627af48a7163b45b7f0",
+    "name": "platform-recipe-0.4.0.tar.zst",
+    "url": "https://github.com/weavesim/simulation-platform-releases/releases/download/v0.4.0/platform-recipe-0.4.0.tar.zst",
+    "sha256": "6c2d25c18ca8dc26f0fcebc27886b2829dc12a03ef70e73827d27949e701abe8",
     "size": 1984,
     "base": "ubuntu:26.04"
   },
   "app": {
-    "name": "platform-app-0.3.0.tar.zst",
-    "url": "https://github.com/weavesim/simulation-platform-releases/releases/download/v0.3.0/platform-app-0.3.0.tar.zst",
-    "sha256": "e771dc7ed68dbf226fdbd8b7bea4e1d1e551052fc110119a17fc38df4f44a11b",
-    "size": 52453742,
-    "size_mb": 50.0
+    "name": "platform-app-0.4.0.tar.zst",
+    "url": "https://github.com/weavesim/simulation-platform-releases/releases/download/v0.4.0/platform-app-0.4.0.tar.zst",
+    "sha256": "1e7ffde2aaa2b806158696c5b1365c0e01ed8071a8a38ecaffc6176214d3c380",
+    "size": 52606888,
+    "size_mb": 50.2
   },
   "tools": {
-    "name": "platform-tools-0.3.0.tar.zst",
-    "url": "https://github.com/weavesim/simulation-platform-releases/releases/download/v0.3.0/platform-tools-0.3.0.tar.zst",
-    "sha256": "7a9dcd5564fb1f1da72c89ed4797683a7cb4b6ff263ae0ea573580b783ba27d0",
-    "size": 117473,
+    "name": "platform-tools-0.4.0.tar.zst",
+    "url": "https://github.com/weavesim/simulation-platform-releases/releases/download/v0.4.0/platform-tools-0.4.0.tar.zst",
+    "sha256": "8a4301cbd92588a31a185078c4641b93ef7110677e0d1d9488fac2bc4bbc58cd",
+    "size": 117367,
     "size_mb": 0.1
   },
   "toolchain": {
-    "id": "tc-1",
-    "sha256": "261bfdf0b58a2d629b63fa5c85e1a9f17e6f4bed60e9407f9ed310af4fff9b10",
+    "id": "tc-2",
+    "sha256": "ef2d90871c2125fdfd4e9d00d6ef33e258b2092b819e920e8cbfd0d127748d04",
     "size_mb": 138.6,
     "assets": [
       {
-        "name": "toolchain-tc-1-beremiz.tar.zst",
-        "url": "https://github.com/weavesim/simulation-platform-releases/releases/download/v0.3.0/toolchain-tc-1-beremiz.tar.zst",
+        "name": "toolchain-tc-2-beremiz.tar.zst",
+        "url": "https://github.com/weavesim/simulation-platform-releases/releases/download/v0.4.0/toolchain-tc-2-beremiz.tar.zst",
         "sha256": "a73cccd143caac8170820b4055b5beb7552b83171e15a5dc4ea17ebb15d4187e",
         "size": 6044854
       },
       {
-        "name": "toolchain-tc-1-matiec.tar.zst",
-        "url": "https://github.com/weavesim/simulation-platform-releases/releases/download/v0.3.0/toolchain-tc-1-matiec.tar.zst",
+        "name": "toolchain-tc-2-matiec.tar.zst",
+        "url": "https://github.com/weavesim/simulation-platform-releases/releases/download/v0.4.0/toolchain-tc-2-matiec.tar.zst",
         "sha256": "5871d86d2d4112b351da15229f94d6000ae0e2a2f8a8b5d1fc9e2a6cc9a55102",
         "size": 8539077
       },
       {
-        "name": "toolchain-tc-1-openplc.tar.zst",
-        "url": "https://github.com/weavesim/simulation-platform-releases/releases/download/v0.3.0/toolchain-tc-1-openplc.tar.zst",
+        "name": "toolchain-tc-2-openplc.tar.zst",
+        "url": "https://github.com/weavesim/simulation-platform-releases/releases/download/v0.4.0/toolchain-tc-2-openplc.tar.zst",
         "sha256": "677c7d3b15652a072ebd73c96da59f08ea5fc767dd8988ebee5a3a35b0649b4c",
         "size": 24400169
       },
       {
-        "name": "toolchain-tc-1-rumoca.tar.zst",
-        "url": "https://github.com/weavesim/simulation-platform-releases/releases/download/v0.3.0/toolchain-tc-1-rumoca.tar.zst",
-        "sha256": "4dd6afc84ff1ceb0f20229a63ad13523c6d63d56bae7cc6e5072af44b06ce01b",
-        "size": 24982540
+        "name": "toolchain-tc-2-rumoca.tar.zst",
+        "url": "https://github.com/weavesim/simulation-platform-releases/releases/download/v0.4.0/toolchain-tc-2-rumoca.tar.zst",
+        "sha256": "6b9c44e4defe6be43a194f853c40ef17b03e37d629605759e85a6fdb3092a0e0",
+        "size": 24981554
       },
       {
-        "name": "toolchain-tc-1-wasi-sysroot.tar.zst",
-        "url": "https://github.com/weavesim/simulation-platform-releases/releases/download/v0.3.0/toolchain-tc-1-wasi-sysroot.tar.zst",
+        "name": "toolchain-tc-2-wasi-sysroot.tar.zst",
+        "url": "https://github.com/weavesim/simulation-platform-releases/releases/download/v0.4.0/toolchain-tc-2-wasi-sysroot.tar.zst",
         "sha256": "63a7153e7e828bd1f2a2370175a0af6471f9b486288fd8aee50d24d899f05d38",
         "size": 81368463
       }
     ]
   },
   "requires": {
-    "launcher": "0.3.0",
+    "launcher": "0.4.0",
     "docker": "classic builder (the engine's build endpoint)"
   },
   "data": {
